@@ -9,14 +9,6 @@
 #include "../CAN/can.h"
 #include "../Alarms/alarm.h"
 
-#define ERR_CAN_LOST (1u << 0)
-#define CAN_ID_INPUTS 0x100
-#define CAN_ID_OUTPUTS 0x200
-
-#define ALARM_CAN_LOST   0
-#define ALARM_EMERGENCY  1
-#define ALARM_STATE_MACHINE_ERROR 2
-
 #define DI_STARTBTN  (1 << 0)
 #define DI_STOPBTN  (1 << 1)
 #define DI_EMERGENCY  (1 << 2)
