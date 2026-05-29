@@ -5,27 +5,32 @@
 
 typedef struct {
     uint32_t version;
-
-// 🔥 RT: process image
+    uint32_t timestamp_ms;
+    
+    // CAN Communication
     struct {
+        uint16_t rx_count;
+        uint16_t tx_count;
+        uint16_t error_count;
+        uint32_t last_rx_time;
+        
+        struct {
+            uint16_t di;      // Digital inputs from CAN ID 0x100
+            uint16_t ai_1;      // Analog inputs from CAN ID 0x100
+        } in;
+        
+        struct {
+            uint16_t do_;     // Digital outputs to CAN ID 0x200
+            uint16_t ao_1;     // Analog outputs to CAN ID 0x200
+        } out;
 
-        uint16_t di;
-        uint16_t ai;
-
-        uint16_t do_;
-        
-        uint32_t heartbeat;
-        
-        uint32_t last_can_rx;
-        
-        uint32_t error_flags;
-    } io;
+    } can;
 
    // 🧠 config data
     struct {
         float setpoint;
         float kp, ki, kd;
-
+        uint16_t cycle_time_ms;
     } config;
 
    // 🧠 Control data
@@ -45,7 +50,7 @@ typedef struct {
         int32_t jitter;
         int32_t max_jitter;
         uint32_t deadline_miss;
-    } rt_stats;
+    } metrics;
 
 
     uint32_t version_end;
