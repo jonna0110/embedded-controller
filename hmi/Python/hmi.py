@@ -1,6 +1,8 @@
 import mmap
 import struct
 import time
+from python_tools import ProcessImage
+
 #run cmd => python3 python_tools/hmi.py
 with open("/dev/shm/process_image", "r+b") as f:
     mm = mmap.mmap(f.fileno(), 0)
@@ -18,3 +20,9 @@ with open("/dev/shm/process_image", "r+b") as f:
         print(f"LATCHED: {bin(alarm_latched)}")
 
         time.sleep(0.5)
+
+with open("/dev/shm/process_image", "r+b") as f:
+    mm = mmap.mmap(f.fileno(), 0)
+    pi = ProcessImage.from_buffer(mm)
+
+    print(pi.version, pi.can.rx_count, pi.canin.di, pi.app.state)
