@@ -24,8 +24,6 @@
 
 #define DO_MOTOR_ON (1 << 0)
 
-
-
 typedef enum {
     STATE_IDLE = 0,
     STATE_STARTING = 10,
