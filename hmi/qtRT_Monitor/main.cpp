@@ -23,3 +23,11 @@ qmake
 make
 ./rt_monitor
 */
+/*
+zooming:
+chartView->setRubberBand(QChartView::RectangleRubberBand);
+*/
+/*
+logging to csv:
+    log << time << jitter << exec << output;
+*/

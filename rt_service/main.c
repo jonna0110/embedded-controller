@@ -114,18 +114,23 @@ void failsafe_logic(process_image_t *p) {
     }
 }
 
-void monitor_rt_stats(rt_stats_t *s){
-    if (s->jitter_us > 50) {
+void monitor_rt_stats(rt_stats_t *s){,
+    
+    #define MAX_EXEC_US 5000
+    #define MAX_JITTER_US 200
+
+    if (s->jitter_us > MAX_JITTER_US) {
         set_alarm(p, ALARM_JITTER);
     } else {
         clear_alarm(p, ALARM_JITTER);
     }
 
-    if (s->exec_time_us > 10000000) { // 10 ms
+    if (s->exec_time_us > MAX_EXEC_US) { // 10 ms
         set_alarm(p, ALARM_EXEC_TIME);
     } else {
         clear_alarm(p, ALARM_EXEC_TIME);
     }
+    
 }
 
 void write_can(process_image_t *p) {

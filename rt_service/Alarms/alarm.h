@@ -4,6 +4,8 @@
 #define ALARM_CAN_LOST   0
 #define ALARM_EMERGENCY  1
 #define ALARM_STATE_MACHINE_ERROR 2
+#define ALARM_EXEC_TIME 3
+#define ALARM_JITTER 4
 
 #include "../shared_memory/process_image.h"
 
