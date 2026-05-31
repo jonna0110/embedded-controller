@@ -10,6 +10,7 @@
 #include "../CAN/can.h"
 #include "../Alarms/alarm.h"
 
+#define cycle_time_ms 10
 #define DI_STARTBTN  (1 << 0)
 #define DI_STOPBTN  (1 << 1)
 #define DI_EMERGENCY  (1 << 2)
@@ -62,10 +63,11 @@ void handle_can_frame(process_image_t *p, struct can_frame *f) {
 
 void sleep_until_next_cycle() {
 
-struct timespec ts;
+    struct timespec ts;
+
     clock_gettime(CLOCK_MONOTONIC, &ts);
 
-    ts.tv_nsec += 100000000; // 100 ms
+    ts.tv_nsec += cycle_time_ms * 1000000; // cycle time in nanoseconds
 
     if (ts.tv_nsec >= 1000000000) {
         ts.tv_sec++;
@@ -186,10 +188,6 @@ int main() {
         clear_alarm(p, ALARM_EMERGENCY); // Ryd alarm
     }
 
-
-
-
-
     if (p->app.alarm_active != 0) {
         p->can.out.do_ = 0;  // fail safe
     } else {
@@ -214,10 +212,6 @@ int main() {
     p->can.tx_count++;
         
         p->version_end = p->version;
-           
-        //printf("RT: Time=%ld DI=%d DO=%d AI=%d Watchdog=%d\n", (long int)time(NULL), p->di, p->do_, p->ai, p->heartbeat);
-
-        //usleep(100000); // 100 ms
     
     sleep_until_next_cycle();
     
