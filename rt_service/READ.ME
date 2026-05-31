@@ -1,0 +1,53 @@
+Install RT kernel
+    sudo apt install linux-image-rt-amd64
+
+Boot args:
+    isolcpus=2 nohz_full=2 rcu_nocbs=2
+
+RT thread setup:
+    #include <sched.h>
+
+    struct sched_param param;
+    param.sched_priority = 80;
+
+    sched_setscheduler(0, SCHED_FIFO, &param);
+
+cpu affinity:
+    taskset -c 2 ./rt_service
+
+System test:
+    sudo cyclictest -p 80 -t1 -n -i 1000
+    
+    ( Output=> Max latency: 50 us ✅ )
+
+    Stress test:
+        stress-ng --cpu 4 --vm 2
+
+    RT failure indikatorer:
+        CPU overload => exec time ↑
+        scheduling issue => jitter ↑
+        blocking call => spikes
+        dårlig driver => latency spikes
+
+    Histogram:
+        
+        int hist[100];
+        int idx = abs(jitter_us) / 10;
+
+        if (idx < 100)
+            hist[idx]++;
+
+    Production ready krav:
+        Exec time < 50% cycle
+        Jitter < 100 µs
+        Max jitter < 300 µs
+        Miss = 0
+
+Implementér:
+    ✅ rt_profiler
+    ✅ jitter tracking
+    ✅ deadline miss
+    ✅ alarm thresholds
+    ✅ HMI visning
+    ✅ CPU isolation
+    ✅ SCHED_FIFO

@@ -6,11 +6,18 @@
 #include <time.h>
 #include <stdint.h>
 
+#include <sched.h>
+
 #include "../shared_memory/process_image.h"
 #include "../CAN/can.h"
 #include "../Alarms/alarm.h"
 
+// Watchdog configuration
+#define CAN_TIMEOUT_MS 500
+#define CAN_RECONNECT_INTERVAL_MS 2000
+
 #define cycle_time_ms 10
+
 #define DI_STARTBTN  (1 << 0)
 #define DI_STOPBTN  (1 << 1)
 #define DI_EMERGENCY  (1 << 2)
@@ -26,6 +33,43 @@ typedef enum {
     STATE_ERROR = 900
 } machine_state_t;
 
+void init_processimage()
+{
+    // Initialize process image
+    shm_unlink(SHM_NAME);  // Clear any old data
+    int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    ftruncate(fd, sizeof(process_image_t));
+
+    process_image_t *p = mmap(NULL, sizeof(process_image_t),
+        PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+}
+
+void setup_realtime()
+{
+    // priority range: 1-99, higher is more priority, 80 is good for RT tasks, but requires root privileges
+    // <50 is for non-RT tasks, 50-79 is for soft real-time, 80-99 is for hard real-time
+
+    // ✅ SCHED_FIFO
+    struct sched_param param;
+    param.sched_priority = 80;
+
+    if (sched_setscheduler(0, SCHED_FIFO, &param) != 0) {
+        perror("sched_setscheduler failed");
+    }
+
+    // ✅ CPU affinity (bind til core 2)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(2, &set);
+
+    if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+        perror("sched_setaffinity failed");
+    }
+
+    printf("RT thread configured (FIFO, CPU 2)\n");
+    // test i terminal => ps -eLo pid,cls,rtprio,pri,cmd | grep rt_service
+}
 
 // monotonic time in milliseconds
 static uint64_t monotonic_ms(void) {
@@ -47,9 +91,64 @@ static void unpack_inputs(process_image_t *p, const uint8_t *data, uint8_t dlc) 
     if (dlc >= 2) p->can.in.ai_1 = data[1];
 }
 
-// Watchdog configuration
-#define CAN_TIMEOUT_MS 500
-#define CAN_RECONNECT_INTERVAL_MS 2000
+void failsafe_logic(process_image_t *p) {
+    // Emergency stop logik
+    if (p->can.in.di & DI_EMERGENCY) {
+        set_alarm(p, ALARM_EMERGENCY); // Sæt alarm
+    } else {
+        clear_alarm(p, ALARM_EMERGENCY); // Ryd alarm
+    }
+
+    if (p->app.alarm_active != 0) {
+        p->can.out.do_ = 0;  // fail safe
+    } else {
+        // 🔧 LOGIK
+        if (p->can.in.di & 1) {
+            p->can.out.do_ |= 1;
+        } else {
+            p->can.out.do_ &= ~1;
+        }
+    }
+}
+
+void read_can(struct can_frame *frame) {
+   // 🔽 READ CAN
+    while (can_read(frame) > 0) {
+
+        printf("RX ID: 0x%X DLC: %d\n", frame.can_id, frame.can_dlc);
+
+        if (frame.can_id == CAN_ID_INPUTS) {
+            // Update watchdog timestamp + counters
+            p->can.last_rx_time = monotonic_ms();
+            p->can.rx_count++;
+            handle_can_frame(p, &frame);
+        }
+    }
+
+    // CAN watchdog (monotonic ms)
+        static uint64_t last_reconnect_attempt = 0;
+        uint64_t now = monotonic_ms();
+        uint64_t last_rx = p->can.last_rx_time;
+
+        if (last_rx == 0) last_rx = now; // initialize
+
+        if ((now - last_rx) > CAN_TIMEOUT_MS) {
+            set_alarm(p, ALARM_CAN_LOST); // Sæt alarm
+            p->can.out.do_ = 0; // fail-safe outputs
+            p->can.error_count++;
+
+            if ((now - last_reconnect_attempt) >= CAN_RECONNECT_INTERVAL_MS) {
+                last_reconnect_attempt = now;
+                can_close();
+                if (can_init("vcan0") == 0) {
+                    // keep alarm until frames resume, but clear transient errors if any
+                }
+            }
+        } else {
+            clear_alarm(p, ALARM_CAN_LOST); // Ryd alarm
+        }
+
+}
 
 void handle_can_frame(process_image_t *p, struct can_frame *f) {
     switch (f->can_id) {
@@ -119,102 +218,43 @@ void state_machine(process_image_t *p) {
 // Run => ./rt_service/rt
 
 int main() {
-    shm_unlink(SHM_NAME);  // Clear any old data
-    int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    ftruncate(fd, sizeof(process_image_t));
 
-    process_image_t *p = mmap(NULL, sizeof(process_image_t),
-        PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-
-    srand(time(NULL));
-
+    init_processimage();
+        
+    // Init Can socket
     can_init("vcan0");
-
     struct can_frame frame;
 
-    while (1) {
+    setup_realtime();
 
+    while (1) {
+        // pre-logic
         p->version++;
 
-   // 🔽 READ CAN
-    while (can_read(&frame) > 0) {
+        read_can(&frame);
+        failsafe_logic(p);
+        state_machine(p);
+        printf("STATE: %d DI: %d DO: %d\n", p->app.state, p->can.in.di, p->can.out.do_);
+        // end pre-logic
 
-        printf("RX ID: 0x%X DLC: %d\n", frame.can_id, frame.can_dlc);
-
-        if (frame.can_id == CAN_ID_INPUTS) {
-            // Update watchdog timestamp + counters
-            p->can.last_rx_time = monotonic_ms();
-            p->can.rx_count++;
-            handle_can_frame(p, &frame);
-        }
-    }
-  
-
-    /*   // Simuler inputs (senere CAN)
-        p->di = rand() % 256;
-        p->ai = rand() % 1000;
-    */
+        // logic
 
 
-    // CAN watchdog (monotonic ms)
-    {
-        static uint64_t last_reconnect_attempt = 0;
-        uint64_t now = monotonic_ms();
-        uint64_t last_rx = p->can.last_rx_time;
-
-        if (last_rx == 0) last_rx = now; // initialize
-
-        if ((now - last_rx) > CAN_TIMEOUT_MS) {
-            set_alarm(p, ALARM_CAN_LOST); // Sæt alarm
-            p->can.out.do_ = 0; // fail-safe outputs
-            p->can.error_count++;
-
-            if ((now - last_reconnect_attempt) >= CAN_RECONNECT_INTERVAL_MS) {
-                last_reconnect_attempt = now;
-                can_close();
-                if (can_init("vcan0") == 0) {
-                    // keep alarm until frames resume, but clear transient errors if any
-                }
-            }
-        } else {
-            clear_alarm(p, ALARM_CAN_LOST); // Ryd alarm
-        }
-    }
-
-   // Emergency stop logik
-    if (p->can.in.di & DI_EMERGENCY) {
-        set_alarm(p, ALARM_EMERGENCY); // Sæt alarm
-    } else {
-        clear_alarm(p, ALARM_EMERGENCY); // Ryd alarm
-    }
-
-    if (p->app.alarm_active != 0) {
-        p->can.out.do_ = 0;  // fail safe
-    } else {
-        // 🔧 LOGIK
-        if (p->can.in.di & 1) {
-            p->can.out.do_ |= 1;
-        } else {
-            p->can.out.do_ &= ~1;
-        }
-    }
-
-    
-    state_machine(p);
-    printf("STATE: %d DI: %d DO: %d\n", p->app.state, p->can.in.di, p->can.out.do_);
 
 
-    // 🔼 WRITE CAN
-    uint8_t tx[8];
+        // end-logic
 
-    int tx_dlc = pack_outputs(p, tx);
-    can_send(CAN_ID_OUTPUTS, tx, tx_dlc);
-    p->can.tx_count++;
-        
+        // post-logic
+        // 🔼 WRITE CAN
+        uint8_t tx[8];
+        int tx_dlc = pack_outputs(p, tx);
+        can_send(CAN_ID_OUTPUTS, tx, tx_dlc);
+
+        p->can.tx_count++;
         p->version_end = p->version;
-    
-    sleep_until_next_cycle();
-    
-}
+        
+        sleep_until_next_cycle();
+        // end post-logic
+    }
 
 }
