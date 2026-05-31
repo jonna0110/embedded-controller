@@ -8,6 +8,9 @@
 
 #include <sched.h>
 
+
+#include "../Profiler/rt_profiler.h"
+
 #include "../shared_memory/process_image.h"
 #include "../CAN/can.h"
 #include "../Alarms/alarm.h"
@@ -23,6 +26,8 @@
 #define DI_EMERGENCY  (1 << 2)
 
 #define DO_MOTOR_ON (1 << 0)
+
+
 
 typedef enum {
     STATE_IDLE = 0,
@@ -107,6 +112,29 @@ void failsafe_logic(process_image_t *p) {
             p->can.out.do_ &= ~1;
         }
     }
+}
+
+void monitor_rt_stats(rt_stats_t *s){
+    if (s->jitter_us > 50) {
+        set_alarm(p, ALARM_JITTER);
+    } else {
+        clear_alarm(p, ALARM_JITTER);
+    }
+
+    if (s->exec_time_us > 10000000) { // 10 ms
+        set_alarm(p, ALARM_EXEC_TIME);
+    } else {
+        clear_alarm(p, ALARM_EXEC_TIME);
+    }
+}
+
+void write_can(process_image_t *p) {
+    // 🔼 WRITE CAN
+    uint8_t tx[8];
+    int tx_dlc = pack_outputs(p, tx);
+    can_send(CAN_ID_OUTPUTS, tx, tx_dlc);
+
+    p->can.tx_count++;
 }
 
 void read_can(struct can_frame *frame) {
@@ -225,9 +253,16 @@ int main() {
 
     setup_realtime();
 
+
+    rt_stats_t stats;
+    rt_profiler_init(&stats);
+
+
     while (1) {
         // pre-logic
         p->version++;
+        
+        rt_profiler_start();
 
         read_can(&frame);
         failsafe_logic(p);
@@ -236,21 +271,19 @@ int main() {
         // end pre-logic
 
         // logic
-
-
-
+        
 
         // end-logic
 
         // post-logic
-        // 🔼 WRITE CAN
-        uint8_t tx[8];
-        int tx_dlc = pack_outputs(p, tx);
-        can_send(CAN_ID_OUTPUTS, tx, tx_dlc);
 
-        p->can.tx_count++;
+        write_can(p);
+
         p->version_end = p->version;
         
+        rt_profiler_end(&stats, cycle_time_ms * 1000000); // 10 ms
+        monitor_rt_stats(&stats);
+
         sleep_until_next_cycle();
         // end post-logic
     }
