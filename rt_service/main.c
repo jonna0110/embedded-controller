@@ -3,7 +3,8 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <linux/time.h>
+#include <time.h>
+#include <stdint.h>
 
 #include "../shared_memory/process_image.h"
 #include "../CAN/can.h"
@@ -24,15 +25,36 @@ typedef enum {
     STATE_ERROR = 900
 } machine_state_t;
 
+
+// monotonic time in milliseconds
+static uint64_t monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000ULL);
+}
+
+// Pack outputs into a CAN payload. Returns DLC used.
+static int pack_outputs(process_image_t *p, uint8_t *tx) {
+    tx[0] = p->can.out.do_ & 0xFF;
+    tx[1] = (p->can.out.do_ >> 8) & 0xFF;
+    return 2;
+}
+
+// Unpack CAN input payload into the process image.
+static void unpack_inputs(process_image_t *p, const uint8_t *data, uint8_t dlc) {
+    if (dlc >= 1) p->can.in.di = data[0];
+    if (dlc >= 2) p->can.in.ai_1 = data[1];
+}
+
+// Watchdog configuration
+#define CAN_TIMEOUT_MS 500
+#define CAN_RECONNECT_INTERVAL_MS 2000
+
 void handle_can_frame(process_image_t *p, struct can_frame *f) {
-
     switch (f->can_id) {
-
         case CAN_ID_INPUTS:
-            p->di = f->data[0];
-            p->ai = f->data[1];
+            unpack_inputs(p, f->data, f->can_dlc);
             break;
-
         default:
             break;
     }
@@ -56,37 +78,33 @@ struct timespec ts;
 
 
 void state_machine(process_image_t *p) {
-
-    switch (p->state) {
-
+    switch (p->app.state) {
         case STATE_IDLE:
             clear_alarm(p, ALARM_STATE_MACHINE_ERROR);
 
-            if (p->di & DI_STARTBTN) {
-                p->state = STATE_STARTING;
+            if (p->can.in.di & DI_STARTBTN) {
+                p->app.state = STATE_STARTING;
             }
             break;
 
         case STATE_STARTING:
-            p->do_ |= DO_MOTOR_ON; // Tænd motor
-            p->state = STATE_RUNNING;
+            p->can.out.do_ |= DO_MOTOR_ON; // Tænd motor
+            p->app.state = STATE_RUNNING;
             break;
 
         case STATE_RUNNING:
-            if (p->di & DI_STOPBTN) {
-                p->do_ &= ~DO_MOTOR_ON; // Sluk motor
-                p->state = STATE_IDLE;
+            if (p->can.in.di & DI_STOPBTN) {
+                p->can.out.do_ &= ~DO_MOTOR_ON; // Sluk motor
+                p->app.state = STATE_IDLE;
             }
             break;
 
         case STATE_ERROR:
             // Håndter fejl
             set_alarm(p, ALARM_STATE_MACHINE_ERROR);
-            
-            if (p->di & DI_STOPBTN) {
-                p->state = STATE_IDLE;
+            if (p->can.in.di & DI_STOPBTN) {
+                p->app.state = STATE_IDLE;
             }
-
             break;
 
         default:
@@ -122,11 +140,10 @@ int main() {
         printf("RX ID: 0x%X DLC: %d\n", frame.can_id, frame.can_dlc);
 
         if (frame.can_id == CAN_ID_INPUTS) {
-            // Opdater watchdog
-            p->last_can_rx = p->heartbeat;
-            
-           handle_can_frame(p, &frame);
-
+            // Update watchdog timestamp + counters
+            p->can.last_rx_time = monotonic_ms();
+            p->can.rx_count++;
+            handle_can_frame(p, &frame);
         }
     }
   
@@ -137,19 +154,35 @@ int main() {
     */
 
 
-  // timeout
-    if ((p->heartbeat - p->last_can_rx) > 20) {
-        set_alarm(p, ALARM_CAN_LOST); // Sæt alarm
-    } 
-    else {
-        clear_alarm(p, ALARM_CAN_LOST); // Ryd alarm
+    // CAN watchdog (monotonic ms)
+    {
+        static uint64_t last_reconnect_attempt = 0;
+        uint64_t now = monotonic_ms();
+        uint64_t last_rx = p->can.last_rx_time;
+
+        if (last_rx == 0) last_rx = now; // initialize
+
+        if ((now - last_rx) > CAN_TIMEOUT_MS) {
+            set_alarm(p, ALARM_CAN_LOST); // Sæt alarm
+            p->can.out.do_ = 0; // fail-safe outputs
+            p->can.error_count++;
+
+            if ((now - last_reconnect_attempt) >= CAN_RECONNECT_INTERVAL_MS) {
+                last_reconnect_attempt = now;
+                can_close();
+                if (can_init("vcan0") == 0) {
+                    // keep alarm until frames resume, but clear transient errors if any
+                }
+            }
+        } else {
+            clear_alarm(p, ALARM_CAN_LOST); // Ryd alarm
+        }
     }
 
    // Emergency stop logik
-    if (p->di & DI_EMERGENCY) {
+    if (p->can.in.di & DI_EMERGENCY) {
         set_alarm(p, ALARM_EMERGENCY); // Sæt alarm
-    } 
-    else {
+    } else {
         clear_alarm(p, ALARM_EMERGENCY); // Ryd alarm
     }
 
@@ -157,32 +190,28 @@ int main() {
 
 
 
-    if (p->alarm_active != 0) {
-        p->do_ = 0;  // fail safe
-    }
-    else{
-    
+    if (p->app.alarm_active != 0) {
+        p->can.out.do_ = 0;  // fail safe
+    } else {
         // 🔧 LOGIK
-        if (p->di & 1) {
-            p->do_ |= 1;
+        if (p->can.in.di & 1) {
+            p->can.out.do_ |= 1;
         } else {
-            p->do_ &= ~1;
+            p->can.out.do_ &= ~1;
         }
-
     }
 
     
     state_machine(p);
-    printf("STATE: %d DI: %d DO: %d\n", p->state, p->di, p->do_);
+    printf("STATE: %d DI: %d DO: %d\n", p->app.state, p->can.in.di, p->can.out.do_);
 
 
     // 🔼 WRITE CAN
-    uint8_t tx[2];
-    tx[0] = p->do_ & 0xFF;
-    tx[1] = (p->do_ >> 8) & 0xFF;
+    uint8_t tx[8];
 
-    can_send(CAN_ID_OUTPUTS, tx, 2);
-        p->heartbeat++;
+    int tx_dlc = pack_outputs(p, tx);
+    can_send(CAN_ID_OUTPUTS, tx, tx_dlc);
+    p->can.tx_count++;
         
         p->version_end = p->version;
            

@@ -10,5 +10,6 @@
 int can_init(const char *ifname);
 int can_read(struct can_frame *frame);
 void can_send(uint32_t id, uint8_t *data, uint8_t dlc);
+int can_close(void);
 
 #endif

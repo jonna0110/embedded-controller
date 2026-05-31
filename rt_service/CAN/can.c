@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
@@ -17,17 +18,37 @@ int can_init(const char *ifname) {
     struct ifreq ifr;
 
     can_socket = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+    if (can_socket < 0) {
+        perror("can: socket");
+        return -1;
+    }
 
-    strcpy(ifr.ifr_name, ifname);
-    ioctl(can_socket, SIOCGIFINDEX, &ifr);
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    if (ioctl(can_socket, SIOCGIFINDEX, &ifr) < 0) {
+        perror("can: ioctl");
+        close(can_socket);
+        can_socket = -1;
+        return -1;
+    }
 
     addr.can_family = AF_CAN;
     addr.can_ifindex = ifr.ifr_ifindex;
 
-    bind(can_socket, (struct sockaddr *)&addr, sizeof(addr));
+    if (bind(can_socket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("can: bind");
+        close(can_socket);
+        can_socket = -1;
+        return -1;
+    }
 
     // non-blocking
-    fcntl(can_socket, F_SETFL, O_NONBLOCK);
+    if (fcntl(can_socket, F_SETFL, O_NONBLOCK) < 0) {
+        perror("can: fcntl");
+        close(can_socket);
+        can_socket = -1;
+        return -1;
+    }
 
     return 0;
 }
@@ -46,4 +67,12 @@ void can_send(uint32_t id, uint8_t *data, uint8_t dlc) {
     memcpy(frame.data, data, dlc);
 
     write(can_socket, &frame, sizeof(frame));
+}
+
+int can_close(void) {
+    if (can_socket >= 0) {
+        close(can_socket);
+        can_socket = -1;
+    }
+    return 0;
 }
