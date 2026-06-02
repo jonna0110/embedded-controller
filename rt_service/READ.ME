@@ -51,3 +51,13 @@ Implementér:
     ✅ HMI visning
     ✅ CPU isolation
     ✅ SCHED_FIFO
+
+    Eventfd for Bridges:
+        RT loop:
+            write(shared memory)
+            write(eventfd)   ← wake signal
+
+        Bridge:
+            read(eventfd)    ← sleeper
+            read(shared memory)
+            send WebSocket
